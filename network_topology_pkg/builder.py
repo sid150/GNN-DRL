@@ -124,3 +124,63 @@ class TopologyBuilder:
                                 propagation_delay=5.0, queue_size=2000)
 
         return topology
+
+
+    @staticmethod
+    def create_random_topology(num_nodes: int,
+                               num_edges: int,
+                               node_prefix: str = "R",
+                               processing_delay_range=(1.0, 5.0),
+                               capacity_range=(50.0, 500.0),
+                               delay_range=(1.0, 10.0)) -> NetworkTopology:
+        """
+        Create a random network topology.
+
+        Args:
+            num_nodes: number of nodes
+            num_edges: number of directed edges to generate
+            node_prefix: naming prefix for nodes
+            processing_delay_range: (min, max) node processing delay
+            capacity_range: (min, max) link capacity in Mbps
+            delay_range: (min, max) propagation delay in ms
+
+        Returns:
+            NetworkTopology
+        """
+        import random
+        topology = NetworkTopology()
+
+        # ---- Add nodes ----
+        nodes = [f"{node_prefix}{i}" for i in range(num_nodes)]
+        for node in nodes:
+            proc_delay = random.uniform(*processing_delay_range)
+            topology.add_node(node, processing_delay=proc_delay)
+
+        # ---- Generate all possible directed edges ----
+        possible_edges = [
+            (src, dst)
+            for src in nodes
+            for dst in nodes
+            if src != dst
+        ]
+
+        # Ensure edges do not exceed possible combinations
+        num_edges = min(num_edges, len(possible_edges))
+
+        # ---- Randomly select edges ----
+        chosen_edges = random.sample(possible_edges, num_edges)
+
+        # ---- Add links ----
+        for src, dst in chosen_edges:
+            capacity = random.uniform(*capacity_range)
+            prop_delay = random.uniform(*delay_range)
+
+            topology.add_link(
+                source_node=src,
+                dest_node=dst,
+                capacity=capacity,
+                propagation_delay=prop_delay,
+                queue_size=1000
+            )
+
+        return topology
