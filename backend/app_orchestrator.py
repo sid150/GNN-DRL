@@ -5,6 +5,7 @@ Coordinates all components for complete routing optimization workflow.
 
 import numpy as np
 import networkx as nx
+import torch
 from typing import Dict, List, Optional, Tuple, Any
 
 # Handle both package and script imports
@@ -111,7 +112,7 @@ class NetworkRoutingSimulator:
         """Create network topology.
         
         Args:
-            topology_type: Type of topology (nsfnet, geant2, random, barabasi, watts_strogatz)
+            topology_type: Type of topology (nsfnet, geant2, random)
             num_nodes: Number of nodes
         
         Returns:
@@ -125,12 +126,8 @@ class NetworkRoutingSimulator:
             self.current_topology = self.topology_builder.build_random(
                 num_nodes, edge_probability=0.3
             )
-        elif topology_type == "barabasi":
-            self.current_topology = self.topology_builder.build_barabasi_albert(num_nodes)
-        elif topology_type == "watts_strogatz":
-            self.current_topology = self.topology_builder.build_watts_strogatz(num_nodes)
         else:
-            raise ValueError(f"Unknown topology type: {topology_type}")
+            raise ValueError(f"Unknown topology type: {topology_type}. Supported types: nsfnet, geant2, random")
         
         # Add link weights
         self.topology_builder.add_link_weights(
@@ -436,8 +433,119 @@ class NetworkRoutingSimulator:
             )
         }
     
+    def _get_improved_state(self) -> Dict:
+        """Get improved network state representation (matches notebook).
+        
+        Returns:
+            State dictionary with node features, edge index, and adjacency matrix
+        """
+        if not self.current_topology or not self.simulator:
+            return {
+                'node_features': torch.zeros((1, 2)),
+                'edge_index': torch.zeros((2, 0), dtype=torch.long),
+                'adjacency_matrix': torch.zeros((1, 1))
+            }
+        
+        nodes = sorted(list(self.current_topology.nodes()))
+        num_nodes = len(nodes)
+        node_to_idx = {node: idx for idx, node in enumerate(nodes)}
+        
+        # Node features: [load, queue_length] normalized
+        node_features = []
+        for node in nodes:
+            load = sum(self.simulator.links.get((node, n), type('obj', (), {'current_load': 0})).current_load 
+                      for n in nodes if (node, n) in self.simulator.links)
+            queue = sum(self.simulator.links.get((node, n), type('obj', (), {'queue_length': 0})).queue_length 
+                       for n in nodes if (node, n) in self.simulator.links)
+            node_features.append([load / 1000.0, queue / 100.0])
+        
+        # Edge index
+        edge_list = []
+        for src, dst in self.simulator.links.keys():
+            if src in node_to_idx and dst in node_to_idx:
+                edge_list.append([node_to_idx[src], node_to_idx[dst]])
+        
+        edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous() if edge_list else torch.zeros((2, 0), dtype=torch.long)
+        
+        # Adjacency matrix
+        adj_matrix = torch.zeros((num_nodes, num_nodes))
+        for src, dst in self.simulator.links.keys():
+            if src in node_to_idx and dst in node_to_idx:
+                adj_matrix[node_to_idx[src], node_to_idx[dst]] = 1.0
+        
+        return {
+            'node_features': torch.tensor(node_features, dtype=torch.float32),
+            'edge_index': edge_index,
+            'adjacency_matrix': adj_matrix
+        }
+    
+    def _encode_flow_state(self, flow: 'Flow', state: Dict) -> np.ndarray:
+        """Encode flow state to 6-feature vector (matches notebook).
+        
+        Args:
+            flow: Flow object
+            state: Current network state
+        
+        Returns:
+            Flow state array [src_idx, dst_idx, volume, priority, avg_load, congestion]
+        """
+        nodes = sorted(list(self.current_topology.nodes()))
+        
+        # Get node indices (normalized)
+        src_idx = nodes.index(flow.source) if flow.source in nodes else 0
+        dst_idx = nodes.index(flow.destination) if flow.destination in nodes else 0
+        src_idx_norm = src_idx / max(len(nodes), 1)
+        dst_idx_norm = dst_idx / max(len(nodes), 1)
+        
+        # Flow volume (normalized to 0-1, assuming max 1000 Mbps)
+        volume_norm = flow.data_rate / 1000.0
+        
+        # Priority (assuming 0-2, normalize to 0-1)
+        priority_norm = getattr(flow, 'priority', 1) / 2.0
+        
+        # Average network load
+        loads = [link.current_load for link in self.simulator.links.values()]
+        avg_load = np.mean(loads) / 1000.0 if loads else 0.0
+        
+        # Congestion (fraction of congested links)
+        congestion = len([l for l in loads if l > 500]) / len(loads) if loads else 0.0
+        
+        return np.array([
+            src_idx_norm,
+            dst_idx_norm,
+            volume_norm,
+            priority_norm,
+            avg_load,
+            congestion
+        ], dtype=np.float32)
+    
+    def _calculate_path_delay(self, path: List[int]) -> float:
+        """Calculate total delay for a path.
+        
+        Args:
+            path: List of node IDs forming the path
+        
+        Returns:
+            Total delay in milliseconds
+        """
+        if not path or len(path) < 2:
+            return float('inf')
+        
+        total_delay = 0.0
+        for i in range(len(path) - 1):
+            link = (path[i], path[i + 1])
+            if link in self.simulator.links:
+                link_state = self.simulator.links[link]
+                # Propagation delay + queue delay
+                queue_delay = link_state.queue_length * 0.1  # 0.1ms per packet in queue
+                total_delay += link_state.latency + queue_delay
+            else:
+                return float('inf')
+        
+        return total_delay
+    
     def train(self, num_episodes: int = None, save_interval: int = 10):
-        """Train agent.
+        """Train agent using improved DRL approach.
         
         Args:
             num_episodes: Number of episodes to train
@@ -446,22 +554,130 @@ class NetworkRoutingSimulator:
         if num_episodes is None:
             num_episodes = self.config.training.num_episodes
         
+        print(f"Starting training for {num_episodes} episodes...")
+        print(f"Configuration:")
+        print(f"  Batch size: {self.config.training.batch_size}")
+        print(f"  Epsilon: {self.config.training.epsilon_start} -> {self.config.training.epsilon_end}")
+        print(f"  Gamma: {self.config.training.gamma}")
+        print(f"  Update frequency: 10 steps")
+        print("-" * 60)
+        
+        epsilon = self.config.training.epsilon_start
+        epsilon_decay = (self.config.training.epsilon_start - self.config.training.epsilon_end) / num_episodes
+        
         for episode in range(num_episodes):
-            # Create new topology
+            # Create new topology for this episode
             self.create_topology("random")
             self.setup_simulator()
             
             # Generate traffic
             self.generate_traffic()
             
-            # Run episode
-            episode_summary = self.run_episode(episode, learning_enabled=True)
+            # Reset metrics
+            self.metrics_tracker.reset_episode()
+            episode_reward = 0.0
             
-            print(f"Episode {episode + 1}/{num_episodes}: Reward = {episode_summary.get('learning', {}).get('episode_reward', 0):.2f}")
+            # Run episode with max 100 steps
+            max_steps = min(100, self.config.network.simulation_duration)
+            
+            for step in range(max_steps):
+                # Get active flows
+                active_flows = self.traffic_generator.get_active_flows(self.flows, step)
+                if not active_flows:
+                    continue
+                
+                # Get current state
+                state = self._get_improved_state()
+                
+                # Select actions for each flow
+                routing_actions = {}
+                for flow in active_flows:
+                    # Update flow state
+                    flow_state = self._encode_flow_state(flow, state)
+                    
+                    # Select action with epsilon-greedy
+                    action = self.gnn_agent.select_action(
+                        state['node_features'],
+                        state['edge_index'],
+                        flow_state,
+                        state.get('adjacency_matrix'),
+                        epsilon=epsilon
+                    )
+                    routing_actions[flow.flow_id] = action
+                    
+                    # Route flow if not already routed
+                    if flow.flow_id not in self.simulator.flow_routes:
+                        path = self.simulator.route_flow(
+                            flow.flow_id,
+                            flow.source,
+                            flow.destination,
+                            action
+                        )
+                        self.flow_routes[flow.flow_id] = path
+                        
+                        # Calculate path delay
+                        delay = self._calculate_path_delay(path)
+                        
+                        # Compute reward using improved method
+                        reward = self.simulator.compute_routing_reward(flow.flow_id, path, delay)
+                        episode_reward += reward
+                        
+                        # Get next state
+                        next_state = self._get_improved_state()
+                        next_flow_state = self._encode_flow_state(flow, next_state)
+                        
+                        # Store experience
+                        done = (step >= max_steps - 1)
+                        self.gnn_agent.store_experience(
+                            state['node_features'],
+                            flow_state,
+                            state['edge_index'],
+                            action,
+                            reward,
+                            next_state['node_features'],
+                            next_flow_state,
+                            next_state['edge_index'],
+                            done
+                        )
+                
+                # Forward flows
+                flows_to_forward = {f.flow_id: f.data_rate for f in active_flows}
+                self.simulator.step(flows_to_forward, routing_actions)
+                
+                # Update policy every 10 steps
+                if (step + 1) % 10 == 0:
+                    losses = self.gnn_agent.update_policy(
+                        batch_size=self.config.training.batch_size,
+                        gamma=self.config.training.gamma
+                    )
+            
+            # Record episode completion
+            self.gnn_agent.record_episode(episode_reward)
+            
+            # Decay epsilon
+            epsilon = max(self.config.training.epsilon_end, epsilon - epsilon_decay)
+            
+            # Compute average reward for last 10 episodes
+            recent_rewards = self.gnn_agent.episode_rewards[-10:]
+            avg_reward = np.mean(recent_rewards) if recent_rewards else episode_reward
+            
+            # Print progress
+            if (episode + 1) % 10 == 0:
+                print(f"Episode {episode + 1:3d}/{num_episodes} | "
+                      f"Reward: {episode_reward:7.3f} | "
+                      f"Avg (last 10): {avg_reward:7.3f} | "
+                      f"Epsilon: {epsilon:.3f}")
             
             # Save checkpoint
             if (episode + 1) % save_interval == 0:
                 self._save_checkpoint(episode)
+        
+        print("-" * 60)
+        print("✓ Training completed")
+        print(f"  Final average reward: {avg_reward:.3f}")
+        if self.gnn_agent.episode_rewards:
+            print(f"  Best episode reward: {max(self.gnn_agent.episode_rewards):.3f}")
+            print(f"  Total episodes: {len(self.gnn_agent.episode_rewards)}")
     
     def _save_checkpoint(self, episode: int):
         """Save training checkpoint.

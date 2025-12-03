@@ -47,12 +47,12 @@ class NetworkConfig:
 @dataclass
 class GNNConfig:
     """Graph Neural Network configuration."""
-    node_feature_dim: int = 128
+    node_feature_dim: int = 2  # Simplified: [load, queue_length]
     edge_feature_dim: int = 64
-    hidden_dim: int = 256
+    hidden_dim: int = 32  # Matches notebook's simplified architecture
     num_gnn_layers: int = 2
     num_classes: int = 3  # Routing actions: shortest, min-delay, max-capacity
-    dropout_rate: float = 0.1
+    dropout_rate: float = 0.0  # No dropout like notebook
     learning_rate: float = 0.001
     weight_decay: float = 1e-5
     
@@ -65,16 +65,17 @@ class GNNConfig:
 @dataclass
 class TrainingConfig:
     """Training configuration."""
-    num_episodes: int = 500
+    num_episodes: int = 500  # Full training like notebook
     num_topologies: int = 402
     batch_size: int = 32
     experience_buffer_size: int = 10000
     target_update_frequency: int = 10
     gamma: float = 0.99  # Discount factor
-    epsilon_start: float = 1.0
+    epsilon_start: float = 0.3  # Notebook starts at 0.3
     epsilon_end: float = 0.01
     epsilon_decay: float = 0.995
     max_grad_norm: float = 1.0
+    max_steps_per_episode: int = 100  # Increased from 50
     
     @property
     def total_flows_per_episode(self) -> int:

@@ -135,62 +135,82 @@ class GNNAgent(nn.Module):
         super().__init__()
         self.config = config
         
-        # GCN layers for node embedding
-        self.gcn_layers = nn.ModuleList([
-            GCNLayer(config.node_feature_dim if i == 0 else config.hidden_dim,
-                    config.hidden_dim,
-                    dropout=config.dropout_rate)
-            for i in range(config.num_gnn_layers)
-        ])
+        # Simplified GCN layers (2 layers like notebook)
+        self.gcn1 = GCNLayer(config.node_feature_dim, config.hidden_dim, dropout=0.0)
+        self.gcn2 = GCNLayer(config.hidden_dim, config.hidden_dim, dropout=0.0)
         
-        # Flow encoder
-        self.flow_encoder = FlowEncoder(config.hidden_dim)
-        
-        # Policy network head
-        self.policy_head = nn.Sequential(
-            nn.Linear(config.hidden_dim + config.hidden_dim // 2, config.hidden_dim),
+        # Flow encoder (6 features: src_idx, dst_idx, volume, priority, avg_load, congestion)
+        self.flow_encoder = nn.Sequential(
+            nn.Linear(6, 32),
             nn.ReLU(),
-            nn.Linear(config.hidden_dim, config.num_actions)
+            nn.Linear(32, config.hidden_dim)
         )
         
-        # Value network head
-        self.value_head = nn.Sequential(
-            nn.Linear(config.hidden_dim + config.hidden_dim // 2, config.hidden_dim),
+        # Policy network head (simplified)
+        self.policy_head = nn.Sequential(
+            nn.Linear(config.hidden_dim, 64),
             nn.ReLU(),
-            nn.Linear(config.hidden_dim, 1)
+            nn.Linear(64, config.num_actions)
+        )
+        
+        # Value network head (simplified)
+        self.value_head = nn.Sequential(
+            nn.Linear(config.hidden_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
         )
         
         self.optimizer = torch.optim.Adam(self.parameters(), 
                                          lr=config.learning_rate)
+        
+        # Experience tracking
+        self.experience_buffer = {
+            'node_features': [],
+            'flow_states': [],
+            'edge_indices': [],
+            'actions': [],
+            'rewards': [],
+            'next_node_features': [],
+            'next_flow_states': [],
+            'next_edge_indices': [],
+            'dones': []
+        }
+        self.episode_rewards = []
+        self.episode_actions = []
     
     def forward(self, node_features: torch.Tensor, edge_index: torch.Tensor,
-               flow_state: torch.Tensor, adj_matrix: torch.Tensor) \
+               flow_state: torch.Tensor, adj_matrix: torch.Tensor = None) \
                -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass through agent.
         
         Args:
             node_features: Node feature matrix (num_nodes, node_feature_dim)
             edge_index: Edge indices (2, num_edges)
-            flow_state: Current flow state (batch, 3) [flow_id, src, dst]
-            adj_matrix: Adjacency matrix (num_nodes, num_nodes)
+            flow_state: Current flow state (6 features)
+            adj_matrix: Adjacency matrix (num_nodes, num_nodes) - optional
         
         Returns:
             Tuple of (action_logits, value_estimate)
         """
-        # GCN forward pass
-        x = node_features
-        for gcn_layer in self.gcn_layers:
-            x = gcn_layer(x, adj_matrix)
+        # GCN forward pass (2 layers)
+        if adj_matrix is None:
+            # Build adjacency from edge_index
+            num_nodes = node_features.size(0)
+            adj_matrix = torch.zeros((num_nodes, num_nodes), device=node_features.device)
+            if edge_index.size(1) > 0:
+                adj_matrix[edge_index[0], edge_index[1]] = 1.0
+        
+        x = F.relu(self.gcn1(node_features, adj_matrix))
+        x = F.relu(self.gcn2(x, adj_matrix))
         
         # Aggregate node embeddings
         graph_embedding = torch.mean(x, dim=0)
         
-        # Encode flow state
+        # Encode flow state (6 features)
         flow_embedding = self.flow_encoder(flow_state.float())
         
-        # Combine graph and flow embeddings
-        combined = torch.cat([graph_embedding.unsqueeze(0), 
-                            flow_embedding], dim=1)
+        # Combine embeddings (add instead of concatenate like notebook)
+        combined = graph_embedding + flow_embedding
         
         # Get policy and value
         action_logits = self.policy_head(combined)
@@ -199,8 +219,8 @@ class GNNAgent(nn.Module):
         return action_logits, value
     
     def select_action(self, node_features: torch.Tensor, edge_index: torch.Tensor,
-                     flow_state: torch.Tensor, adj_matrix: torch.Tensor,
-                     deterministic: bool = False) -> int:
+                     flow_state: torch.Tensor, adj_matrix: torch.Tensor = None,
+                     deterministic: bool = False, epsilon: float = 0.1) -> int:
         """Select action for current state.
         
         Args:
@@ -209,98 +229,135 @@ class GNNAgent(nn.Module):
             flow_state: Flow state
             adj_matrix: Adjacency matrix
             deterministic: Whether to select action deterministically
+            epsilon: Exploration rate (epsilon-greedy)
         
         Returns:
             Selected action index
         """
         with torch.no_grad():
+            # Ensure flow_state is tensor
+            if isinstance(flow_state, np.ndarray):
+                flow_state = torch.tensor(flow_state, dtype=torch.float32)
+            
             logits, _ = self.forward(node_features, edge_index, flow_state, adj_matrix)
+            probabilities = F.softmax(logits, dim=0)
             
             if deterministic:
-                action = torch.argmax(logits, dim=1).item()
+                action = probabilities.argmax().item()
+            elif np.random.random() < epsilon:
+                # Explore
+                action = np.random.randint(self.config.num_actions)
             else:
-                probs = F.softmax(logits, dim=1)
-                action = torch.multinomial(probs, 1).item()
+                # Exploit
+                action = probabilities.argmax().item()
             
+            self.episode_actions.append(action)
             return action
     
-    def update_policy(self, states: List[Dict], actions: np.ndarray,
-                     rewards: np.ndarray, next_states: List[Dict],
-                     dones: np.ndarray, gamma: float = 0.99) -> Dict[str, float]:
-        """Update policy using experience.
+    def store_experience(self, node_features, flow_state, edge_index, action: int,
+                        reward: float, next_node_features, next_flow_state,
+                        next_edge_index, done: bool):
+        """Store experience in buffer.
         
         Args:
-            states: List of state dicts
-            actions: Actions taken (array)
-            rewards: Rewards received (array)
-            next_states: Next states (array)
-            dones: Whether episode ended (array)
+            node_features: Current node features
+            flow_state: Current flow state
+            edge_index: Current edge index
+            action: Action taken
+            reward: Reward received
+            next_node_features: Next node features
+            next_flow_state: Next flow state
+            next_edge_index: Next edge index
+            done: Whether episode ended
+        """
+        self.experience_buffer['node_features'].append(node_features)
+        self.experience_buffer['flow_states'].append(flow_state)
+        self.experience_buffer['edge_indices'].append(edge_index)
+        self.experience_buffer['actions'].append(action)
+        self.experience_buffer['rewards'].append(reward)
+        self.experience_buffer['next_node_features'].append(next_node_features)
+        self.experience_buffer['next_flow_states'].append(next_flow_state)
+        self.experience_buffer['next_edge_indices'].append(next_edge_index)
+        self.experience_buffer['dones'].append(done)
+    
+    def record_episode(self, episode_reward: float):
+        """Record episode completion.
+        
+        Args:
+            episode_reward: Total episode reward
+        """
+        self.episode_rewards.append(episode_reward)
+        self.episode_actions = []
+    
+    def update_policy(self, batch_size: int = 32, gamma: float = 0.99) -> Dict[str, float]:
+        """Update policy using experience buffer (notebook approach).
+        
+        Args:
+            batch_size: Batch size for training
             gamma: Discount factor
         
         Returns:
             Dictionary of loss values
         """
-        losses = {}
+        if len(self.experience_buffer['actions']) < batch_size:
+            return {'policy_loss': 0.0, 'value_loss': 0.0, 'total_loss': 0.0}
         
-        # Convert to tensors
-        actions_tensor = torch.LongTensor(actions)
-        rewards_tensor = torch.FloatTensor(rewards)
-        dones_tensor = torch.FloatTensor(dones)
+        indices = np.random.choice(len(self.experience_buffer['actions']),
+                                   batch_size, replace=False)
         
-        total_policy_loss = 0.0
-        total_value_loss = 0.0
+        policy_losses = []
+        value_losses = []
         
-        for i, state in enumerate(states):
-            if i >= len(next_states):
-                continue
+        device = next(self.parameters()).device
+        
+        for idx in indices:
+            node_features = self.experience_buffer['node_features'][idx].to(device)
+            flow_state = self.experience_buffer['flow_states'][idx]
+            if isinstance(flow_state, np.ndarray):
+                flow_state = torch.tensor(flow_state, dtype=torch.float32)
+            edge_index = self.experience_buffer['edge_indices'][idx].to(device)
+            action = self.experience_buffer['actions'][idx]
+            reward = self.experience_buffer['rewards'][idx]
+            next_node_features = self.experience_buffer['next_node_features'][idx].to(device)
+            next_flow_state = self.experience_buffer['next_flow_states'][idx]
+            if isinstance(next_flow_state, np.ndarray):
+                next_flow_state = torch.tensor(next_flow_state, dtype=torch.float32)
+            next_edge_index = self.experience_buffer['next_edge_indices'][idx].to(device)
+            done = self.experience_buffer['dones'][idx]
             
-            # Get current state value and policy
-            logits, value = self.forward(
-                state['node_features'],
-                state['edge_index'],
-                state['flow_state'],
-                state['adjacency_matrix']
-            )
-            
-            # Get next state value (for bootstrapping)
+            # Compute target value
             with torch.no_grad():
-                next_logits, next_value = self.forward(
-                    next_states[i]['node_features'],
-                    next_states[i]['edge_index'],
-                    next_states[i]['flow_state'],
-                    next_states[i]['adjacency_matrix']
-                )
+                _, next_value = self.forward(next_node_features, next_edge_index, next_flow_state)
+                next_value = next_value.item() if not done else 0.0
+                td_target = reward + gamma * next_value
             
-            # Compute advantage
-            target_value = rewards_tensor[i] + gamma * next_value.squeeze() * (1 - dones_tensor[i])
-            advantage = target_value - value.squeeze()
+            # Forward pass
+            policy_logits, value = self.forward(node_features, edge_index, flow_state)
+            value = value.squeeze()
             
-            # Policy loss (cross-entropy)
-            policy_loss = F.cross_entropy(logits, actions_tensor[i:i+1])
+            # Compute losses
+            value_loss = F.mse_loss(value, torch.tensor(td_target, dtype=torch.float32, device=device))
+            policy_loss = -F.log_softmax(policy_logits, dim=0)[action]
             
-            # Value loss (MSE)
-            value_loss = F.mse_loss(value.squeeze(), target_value)
-            
-            # Entropy regularization
-            probs = F.softmax(logits, dim=1)
-            entropy = -(probs * torch.log(probs + 1e-8)).sum()
-            
-            # Combined loss
-            loss = policy_loss + value_loss - 0.01 * entropy
-            
-            total_policy_loss += policy_loss.item()
-            total_value_loss += value_loss.item()
-            
-            # Backward pass
-            self.optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
-            self.optimizer.step()
+            policy_losses.append(policy_loss)
+            value_losses.append(value_loss)
         
-        losses['policy_loss'] = total_policy_loss / max(len(states), 1)
-        losses['value_loss'] = total_value_loss / max(len(states), 1)
+        # Combined loss
+        total_policy_loss = torch.stack(policy_losses).mean()
+        total_value_loss = torch.stack(value_losses).mean()
+        total_loss = total_policy_loss + total_value_loss
         
-        return losses
+        # Backpropagation
+        self.optimizer.zero_grad()
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+        self.optimizer.step()
+        
+        return {
+            'policy_loss': total_policy_loss.item(),
+            'value_loss': total_value_loss.item(),
+            'total_loss': total_loss.item()
+        }
     
     def save_checkpoint(self, filepath: str):
         """Save model checkpoint.
