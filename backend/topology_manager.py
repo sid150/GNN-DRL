@@ -30,11 +30,11 @@ class NetworkTopologyBuilder:
         self.current_topology = None
         self.current_graph = None
     
-    def build_geant2(self, num_nodes: int = 40) -> nx.Graph:
+    def build_geant2(self, num_nodes: int = 24) -> nx.Graph:
         """Build GEANT2 network topology.
         
         Args:
-            num_nodes: Number of nodes in GEANT2-like topology
+            num_nodes: Number of nodes in GEANT2-like topology (default 24)
         
         Returns:
             NetworkX graph
@@ -42,7 +42,7 @@ class NetworkTopologyBuilder:
         self.current_graph = nx.Graph()
         self.current_graph.add_nodes_from(range(num_nodes))
         
-        # Add edges with realistic connectivity patterns
+        # Add edges with realistic connectivity patterns (base topology for 16 nodes)
         edges = [
             (0, 1), (1, 2), (2, 3), (3, 4), (4, 5),
             (5, 6), (6, 7), (7, 8), (8, 9), (9, 10),
@@ -51,9 +51,20 @@ class NetworkTopologyBuilder:
             (0, 5), (2, 7), (4, 9), (6, 11), (8, 13)
         ]
         
+        # Add all base edges
         for src, dst in edges:
             if src < num_nodes and dst < num_nodes:
                 self.current_graph.add_edge(src, dst)
+        
+        # If more nodes requested, connect them to the base topology
+        if num_nodes > 16:
+            for i in range(16, num_nodes):
+                # Connect each additional node to 2-3 random existing nodes
+                import random
+                num_connections = min(3, i)
+                targets = random.sample(range(i), num_connections)
+                for target in targets:
+                    self.current_graph.add_edge(i, target)
         
         return self.current_graph
     
