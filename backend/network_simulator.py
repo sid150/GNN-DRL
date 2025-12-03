@@ -299,6 +299,47 @@ class NetworkSimulator:
             'delay_ms': metrics.average_delay
         }
     
+    def compute_routing_reward(self, flow_id: int, path: List[int], delay: float) -> float:
+        """Compute reward for routing decision (matches notebook approach).
+        
+        Args:
+            flow_id: Flow identifier
+            path: Routing path taken
+            delay: Total path delay
+        
+        Returns:
+            Reward value
+        """
+        # No path penalty
+        if not path or len(path) < 2:
+            return -0.15
+        
+        # Success bonus for finding valid path
+        success_bonus = 0.05
+        
+        # Delay penalty (normalized)
+        delay_normalized = min(max(delay, 0) / 500.0, 1.0)
+        delay_penalty = -0.025 * delay_normalized
+        
+        # Load balancing penalty
+        load_penalty = 0.0
+        if len(path) > 1:
+            total_load = 0
+            for i in range(len(path) - 1):
+                link = (path[i], path[i + 1])
+                load = self.links.get(link, LinkState(0, 1, 100)).current_load
+                total_load += load
+            
+            avg_load = total_load / len(path)
+            if avg_load > 300:
+                load_normalized = min((avg_load - 300) / 700.0, 1.0)
+                load_penalty = -0.015 * load_normalized
+        
+        # Path efficiency bonus
+        path_efficiency = 0.01 if len(path) <= 4 else 0.005
+        
+        return success_bonus + delay_penalty + load_penalty + path_efficiency
+    
     def step(self, flows_to_forward: Dict[int, float], routing_actions: Dict[int, int]):
         """Execute one simulation step.
         

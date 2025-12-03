@@ -35,7 +35,7 @@ class UtilizationMetrics:
     """Network utilization metrics."""
     avg_link_utilization: float = 0.0  # Percentage
     max_link_utilization: float = 0.0  # Percentage
-    j_fairness: float = 0.0  # Jain fairness index
+    j_fairness: float = 0.0  # fairness index
     load_balance_index: float = 0.0  # How well balanced
     congested_links: int = 0  # Number of congested links
     
