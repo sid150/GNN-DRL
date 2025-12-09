@@ -6,14 +6,21 @@ A full-stack application that uses Graph Neural Networks (GNN) with Deep Reinfor
 
 ### Backend Setup
 
-1. **Install Python dependencies:**
+1. **Create a Python virtual environment:**
+   ```bash
+   cd backend
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
+
+2. **Install Python dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
 
-2. **Start the backend API server:**
+3. **Start the backend API server:**
    ```bash
-   cd backend
+   export PYTORCH_JIT=0
    python main.py api --port 8000
    ```
    
