@@ -7,50 +7,109 @@ import {
   Grid,
   Button,
   Paper,
+  CircularProgress,
+  Alert,
 } from '@mui/material';
 import { Refresh, Download } from '@mui/icons-material';
-import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import ReactECharts from 'echarts-for-react';
+import { api } from '@/services/api';
+
+interface MetricsData {
+  timestamp: string;
+  learning: any[];
+  utilization: any[];
+  qos_summary: any;
+  current_episode: number;
+}
 
 export default function Metrics() {
-  const dispatch = useAppDispatch();
-  const experiments = useAppSelector((state) => state.experiments.items);
+  const [metricsData, setMetricsData] = useState<MetricsData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Mock data for demonstration
-  const delayChartOption = {
-    title: { text: 'Average Delay Over Time', left: 'center' },
-    tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: ['0', '10', '20', '30', '40', '50', '60', '70', '80', '90', '100'] },
-    yAxis: { type: 'value', name: 'Delay (ms)' },
-    series: [
-      {
-        name: 'GNN-DRL',
-        type: 'line',
-        data: [45, 42, 38, 35, 33, 30, 28, 27, 26, 25, 24],
-        smooth: true,
-        itemStyle: { color: '#1976d2' },
-      },
-      {
-        name: 'Shortest Path',
-        type: 'line',
-        data: [50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60],
-        smooth: true,
-        itemStyle: { color: '#dc004e' },
-      },
-    ],
-    legend: { data: ['GNN-DRL', 'Shortest Path'], bottom: 10 },
+  const fetchMetrics = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const history = await api.metrics.getHistory();
+      setMetricsData(history);
+    } catch (err: any) {
+      setError(err.message || 'Failed to fetch metrics');
+      console.error('Error fetching metrics:', err);
+    } finally {
+      setLoading(false);
+    }
   };
 
+  useEffect(() => {
+    fetchMetrics();
+    // Refresh every 5 seconds
+    const interval = setInterval(fetchMetrics, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleRefresh = () => {
+    fetchMetrics();
+  };
+
+  const handleExport = async () => {
+    try {
+      // TODO: Implement export functionality
+      console.log('Export metrics');
+    } catch (err) {
+      console.error('Error exporting metrics:', err);
+    }
+  };
+
+  if (loading && !metricsData) {
+    return (
+      <Box display="flex" justifyContent="center" alignItems="center" minHeight="400px">
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  if (error) {
+    return (
+      <Alert severity="error" sx={{ mb: 3 }}>
+        {error}
+      </Alert>
+    );
+  }
+
+  // Extract data for charts
+  const learningHistory = metricsData?.learning || [];
+  const utilizationHistory = metricsData?.utilization || [];
+  const qosSummary = metricsData?.qos_summary || {};
+
+  // Prepare reward chart data
+  const rewardData = learningHistory.map((item: any) => item.avg_reward || 0);
+  const episodeLabels = learningHistory.map((_: any, idx: number) => idx.toString());
+
+  // Prepare utilization chart data
+  const avgUtilization = utilizationHistory.map((item: any) => item.avg_link_utilization || 0);
+  const maxUtilization = utilizationHistory.map((item: any) => item.max_link_utilization || 0);
+
+  // Current metrics
+  const avgLatency = qosSummary.avg_latency_ms || 0;
+  const avgThroughput = qosSummary.avg_throughput_mbps || 0;
+  const avgPacketLoss = (qosSummary.avg_packet_loss || 0) * 100;
+  const lastReward = rewardData.length > 0 ? rewardData[rewardData.length - 1] : 0;
+
+  // Chart options
   const rewardChartOption = {
     title: { text: 'Training Reward Progress', left: 'center' },
     tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: Array.from({ length: 21 }, (_, i) => (i * 5).toString()) },
+    xAxis: { 
+      type: 'category', 
+      data: episodeLabels.length > 0 ? episodeLabels : ['No data'] 
+    },
     yAxis: { type: 'value', name: 'Reward' },
     series: [
       {
         name: 'Episode Reward',
         type: 'line',
-        data: [-100, -80, -60, -50, -40, -30, -25, -20, -15, -12, -10, -8, -6, -5, -4, -3, -2, -1, 0, 2, 5],
+        data: rewardData.length > 0 ? rewardData : [0],
         smooth: true,
         itemStyle: { color: '#2e7d32' },
       },
@@ -58,40 +117,68 @@ export default function Metrics() {
   };
 
   const utilizationChartOption = {
-    title: { text: 'Link Utilization Distribution', left: 'center' },
+    title: { text: 'Link Utilization Over Time', left: 'center' },
     tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: ['Link 1', 'Link 2', 'Link 3', 'Link 4', 'Link 5', 'Link 6'] },
+    xAxis: { 
+      type: 'category', 
+      data: utilizationHistory.map((_: any, idx: number) => idx.toString())
+    },
     yAxis: { type: 'value', name: 'Utilization (%)', max: 100 },
     series: [
       {
-        name: 'Utilization',
-        type: 'bar',
-        data: [65, 45, 78, 52, 38, 70],
+        name: 'Avg Utilization',
+        type: 'line',
+        data: avgUtilization,
+        smooth: true,
+        itemStyle: { color: '#1976d2' },
+      },
+      {
+        name: 'Max Utilization',
+        type: 'line',
+        data: maxUtilization,
+        smooth: true,
+        itemStyle: { color: '#dc004e' },
+      },
+    ],
+    legend: { data: ['Avg Utilization', 'Max Utilization'], bottom: 10 },
+  };
+
+  const fairnessChartOption = {
+    title: { text: 'Network Fairness Index', left: 'center' },
+    tooltip: { trigger: 'axis' },
+    xAxis: { 
+      type: 'category', 
+      data: utilizationHistory.map((_: any, idx: number) => idx.toString())
+    },
+    yAxis: { type: 'value', name: 'Fairness Index', max: 1 },
+    series: [
+      {
+        name: 'Jain\'s Fairness',
+        type: 'line',
+        data: utilizationHistory.map((item: any) => item.j_fairness || 0),
+        smooth: true,
         itemStyle: { color: '#ed6c02' },
       },
     ],
   };
 
-  const throughputChartOption = {
-    title: { text: 'Throughput Comparison', left: 'center' },
+  const delayChartOption = {
+    title: { text: 'Average Latency Trend', left: 'center' },
     tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: ['NSFNET', 'GEANT2', 'Custom 1', 'Custom 2'] },
-    yAxis: { type: 'value', name: 'Throughput (Mbps)' },
+    xAxis: { 
+      type: 'category', 
+      data: learningHistory.map((_: any, idx: number) => idx.toString())
+    },
+    yAxis: { type: 'value', name: 'Latency (ms)' },
     series: [
       {
-        name: 'GNN-DRL',
-        type: 'bar',
-        data: [850, 920, 780, 890],
+        name: 'Avg Latency',
+        type: 'line',
+        data: learningHistory.map(() => avgLatency),
+        smooth: true,
         itemStyle: { color: '#1976d2' },
       },
-      {
-        name: 'Baseline',
-        type: 'bar',
-        data: [650, 700, 600, 680],
-        itemStyle: { color: '#dc004e' },
-      },
     ],
-    legend: { data: ['GNN-DRL', 'Baseline'], bottom: 10 },
   };
 
   return (
@@ -99,27 +186,33 @@ export default function Metrics() {
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Typography variant="h4">Performance Metrics</Typography>
         <Box sx={{ display: 'flex', gap: 2 }}>
-          <Button variant="outlined" startIcon={<Refresh />}>
+          <Button variant="outlined" startIcon={<Refresh />} onClick={handleRefresh}>
             Refresh
           </Button>
-          <Button variant="contained" startIcon={<Download />}>
+          <Button variant="contained" startIcon={<Download />} onClick={handleExport}>
             Export
           </Button>
         </Box>
       </Box>
+
+      {error && (
+        <Alert severity="error" sx={{ mb: 3 }}>
+          {error}
+        </Alert>
+      )}
 
       <Grid container spacing={3} sx={{ mb: 3 }}>
         <Grid item xs={12} md={3}>
           <Card>
             <CardContent>
               <Typography variant="h6" gutterBottom>
-                Avg Delay
+                Avg Latency
               </Typography>
               <Typography variant="h3" color="primary">
-                24ms
+                {avgLatency.toFixed(2)}ms
               </Typography>
-              <Typography variant="caption" color="success.main">
-                ↓ 52% improvement
+              <Typography variant="caption" color="text.secondary">
+                Current average
               </Typography>
             </CardContent>
           </Card>
@@ -131,10 +224,10 @@ export default function Metrics() {
                 Throughput
               </Typography>
               <Typography variant="h3" color="primary">
-                850Mbps
+                {avgThroughput.toFixed(0)}Mbps
               </Typography>
-              <Typography variant="caption" color="success.main">
-                ↑ 31% improvement
+              <Typography variant="caption" color="text.secondary">
+                Current average
               </Typography>
             </CardContent>
           </Card>
@@ -146,10 +239,10 @@ export default function Metrics() {
                 Packet Loss
               </Typography>
               <Typography variant="h3" color="primary">
-                0.8%
+                {avgPacketLoss.toFixed(2)}%
               </Typography>
-              <Typography variant="caption" color="success.main">
-                ↓ 65% improvement
+              <Typography variant="caption" color="text.secondary">
+                Current rate
               </Typography>
             </CardContent>
           </Card>
@@ -158,13 +251,13 @@ export default function Metrics() {
           <Card>
             <CardContent>
               <Typography variant="h6" gutterBottom>
-                Avg Reward
+                Last Reward
               </Typography>
               <Typography variant="h3" color="primary">
-                5.2
+                {lastReward.toFixed(2)}
               </Typography>
               <Typography variant="caption" color="text.secondary">
-                Latest episode
+                Episode {metricsData?.current_episode || 0}
               </Typography>
             </CardContent>
           </Card>
@@ -189,7 +282,7 @@ export default function Metrics() {
         </Grid>
         <Grid item xs={12} md={6}>
           <Paper sx={{ p: 2 }}>
-            <ReactECharts option={throughputChartOption} style={{ height: '350px' }} />
+            <ReactECharts option={fairnessChartOption} style={{ height: '350px' }} />
           </Paper>
         </Grid>
       </Grid>

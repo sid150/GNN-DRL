@@ -504,6 +504,31 @@ function ExperimentRow({ experiment, onStop, getStatusColor }: { experiment: Exp
                       </Box>
                     </Paper>
                   </Grid>
+
+                  {/* Routing Policy Distribution */}
+                  <Grid item xs={12} md={6}>
+                    <Paper variant="outlined" sx={{ p: 2 }}>
+                      <Typography variant="subtitle2" color="primary" gutterBottom>
+                        Routing Policy Chosen
+                      </Typography>
+                      <Divider sx={{ mb: 1 }} />
+                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+                        <Typography variant="body2">
+                          Policy: <strong>
+                            {(() => {
+                              const dist = (experiment.metrics as any).policyDistribution;
+                              if (!dist) return 'N/A';
+                              const maxVal = Math.max(dist.shortestHop || 0, dist.minDelay || 0, dist.maxCapacity || 0);
+                              if (dist.shortestHop === maxVal) return 'Shortest Hop Path';
+                              if (dist.minDelay === maxVal) return 'Minimum Delay Path';
+                              if (dist.maxCapacity === maxVal) return 'Maximum Capacity Path';
+                              return 'N/A';
+                            })()}
+                          </strong>
+                        </Typography>
+                      </Box>
+                    </Paper>
+                  </Grid>
                 </Grid>
               </Box>
             </Collapse>
